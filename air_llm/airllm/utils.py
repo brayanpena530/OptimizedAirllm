@@ -25,12 +25,12 @@ from safetensors.torch import load_file, save_file
 from .persist import ModelPersister
 
 
-try:
-    import bitsandbytes as bnb
+# try:
+#     import bitsandbytes as bnb
 
-    bitsandbytes_installed = True
-except ImportError:
-    bitsandbytes_installed = False
+#     bitsandbytes_installed = True
+# except ImportError:
+bitsandbytes_installed = False
 
 
 import huggingface_hub

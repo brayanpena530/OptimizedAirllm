@@ -18,13 +18,13 @@ from optimum.bettertransformer import BetterTransformer
 from .utils import clean_memory, load_layer, \
     find_or_create_local_splitted_path
 
-try:
-    import bitsandbytes as bnb
+# try:
+#     import bitsandbytes as bnb
 
-    bitsandbytes_installed = True
-    print('>>>> bitsandbytes installed')
-except ImportError:
-    bitsandbytes_installed = False
+#     bitsandbytes_installed = True
+#     print('>>>> bitsandbytes installed')
+# except ImportError:
+#     bitsandbytes_installed = False
 
 
 
@@ -88,9 +88,9 @@ class AirLLMBaseModel(GenerationMixin):
         self.total_gpu_loading_time = None
         self.total_compression_overhead_time = None
 
-        if compression is not None:
-            if not bitsandbytes_installed:
-                raise ImportError('WARNING: bitsandbytes not found. Compression needs bitsandbytes. To use compression, please install bitsandbytes: `pip install bitsandbytes`')
+        # if compression is not None:
+        #     if not bitsandbytes_installed:
+        #         raise ImportError('WARNING: bitsandbytes not found. Compression needs bitsandbytes. To use compression, please install bitsandbytes: `pip install bitsandbytes`')
 
 
         self.compression = compression
@@ -153,6 +153,9 @@ class AirLLMBaseModel(GenerationMixin):
             self.stream = torch.cuda.Stream()
         else:
             self.stream = None
+        
+        self.state_dict = {}
+        self.load_and_pin()
 
     # if derived class needs to create generation config differently, like Mistrial, this function can be overridden
     def get_generation_config(self):
@@ -172,6 +175,12 @@ class AirLLMBaseModel(GenerationMixin):
 
     def get_use_better_transformer(self):
         return True
+    
+    def load_and_pin(self):
+        for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
+                                               desc=f'running layers(self.running_device)',
+                                               total=len(self.layers)):
+            self.state_dict[layer_name] = self.load_layer_to_cpu(layer_name)
 
     def init_model(self):
 
@@ -413,11 +422,15 @@ class AirLLMBaseModel(GenerationMixin):
         with torch.inference_mode(), ThreadPoolExecutor() as executor:
 
             # Load first layer
+            # if self.prefetching:
+            #     #with torch.cuda.stream(self.stream):
+            #     #state_dict = self.load_layer_to_cpu(self.layer_names[0])
+            #     future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
+
             if self.prefetching:
                 #with torch.cuda.stream(self.stream):
                 #state_dict = self.load_layer_to_cpu(self.layer_names[0])
-                future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
-
+                future = executor.submit(self.move_layer_to_device, self.state_dict[self.layer_names[0]])
 
             for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
                                                desc=f'running layers(self.running_device)',
@@ -427,7 +440,7 @@ class AirLLMBaseModel(GenerationMixin):
                     if self.profiling_mode:
                         t = time.time()
                     # Load current layer and prepare next layer
-                    state_dict = future.result()
+                    state_dict = self.state_dict[layer_name]
                     #torch.cuda.current_stream().wait_stream(self.stream)
                     if self.profiling_mode:
                         elapsed_time = time.time() - t
@@ -438,7 +451,8 @@ class AirLLMBaseModel(GenerationMixin):
 
                     if self.profiling_mode:
                         t = time.time()
-                    self.move_layer_to_device(state_dict)
+                    future = executor.submit(self.move_layer_to_device, state_dict)
+                    # self.move_layer_to_device(state_dict)
                     if self.profiling_mode:
                         elapsed_time = time.time() - t
                         self.profiler.add_profiling_time('create_layer_from_state_dict', elapsed_time)
@@ -450,7 +464,7 @@ class AirLLMBaseModel(GenerationMixin):
                         #state_dict = self.load_layer_to_cpu(self.layer_names[i + 1])
                         if self.profiling_mode:
                             t = time.time()
-                        future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
+                        # future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
                         #for param_name, param in state_dict.items():
                         #    state_dict[param_name] = param.to('cuda', non_blocking=True)
 
@@ -459,7 +473,7 @@ class AirLLMBaseModel(GenerationMixin):
                             self.profiler.add_profiling_time('kick_off_load_cpu', elapsed_time)
 
                 else:
-                    state_dict = self.load_layer_to_cpu(layer_name)
+                    state_dict = self.state_dict[layer_name]
                     if self.profiling_mode:
                         t = time.time()
                     self.move_layer_to_device(state_dict)
@@ -468,7 +482,7 @@ class AirLLMBaseModel(GenerationMixin):
                         self.profiler.add_profiling_time('create_layer_from_safe_tensor', elapsed_time)
 
                 # Run layer
-
+                res = future.result()
                 for j, seq in enumerate(batch):
 
                     if layer_name == self.layer_names_dict['embed']:
